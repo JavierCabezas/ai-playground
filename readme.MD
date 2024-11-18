@@ -8,3 +8,4 @@ docker run -it --rm -v $(pwd):/usr/src/app -w /usr/src/app my-python-app python 
  - summary.py: Gets the summary of an article.
  - image_caption_generator.py: Gets a small description from the given images.
  - cv_reader: Gets keywords from CVs in text format.
+ - document_classifier: Gets a category from a list of news headlines. 
