@@ -3,6 +3,7 @@ import numpy as np
 import os
 from tensorflow.keras.preprocessing.image import load_img, img_to_array
 import matplotlib.pyplot as plt
+import sklearn
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
 import json
