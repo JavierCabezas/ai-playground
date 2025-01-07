@@ -1,0 +1,17 @@
+version: "3.8"
+services:
+  generator:
+    build:
+      context: ../generator
+      dockerfile: ../docker/generator.Dockerfile
+    volumes:
+      - ../generator:/app  # Mount local generator code
+      - ../logs:/app/logs  # Mount logs directory
+    command: python generator.py  # Run the script
+
+  analyzer:
+    build:
+      context: ../analyzer
+      dockerfile: ../docker/analyzer.Dockerfile
+    volumes:
+      - ../logs:/app/logs
