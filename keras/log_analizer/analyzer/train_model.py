@@ -1,131 +1,124 @@
-import re
-import pandas as pd
 import numpy as np
-from tensorflow.keras.models import Model, load_model
-from tensorflow.keras.layers import Input, Dense
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping
+import pandas as pd
+from tensorflow.keras.models import load_model
+from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
 import joblib
 import os
-from analysis_tools import (
-    plot_loss_curves,
-    plot_error_distribution,
-    calculate_confusion_matrix,
-    plot_roc_pr_curves
-)
+import matplotlib.pyplot as plt
 
-# File paths
+# Paths
 LOG_FILE_PATH = "/app/logs/server_logs.txt"
-MODEL_FILE_PATH = "/app/models/autoencoder_model.keras"  # Updated to .keras format
-SCALER_FILE_PATH = "/app/models/scaler.pkl"
+DEBUG_LOG_FILE_PATH = "/app/logs/debug_logs.txt"
+SCALER_PATH = "/app/models/scaler.pkl"
+MODEL_PATH = "/app/models/lstm_autoencoder.keras"
+CHARTS_OUTPUT_DIR = "/app/charts/"
+ANOMALIES_OUTPUT_PATH = "/app/logs/anomalies.csv"
+ERROR_HISTOGRAM_PATH = "/app/charts/unseen_data_errors.png"
 
-# Training configuration
-TRAINING_WEEKS = 4
-BATCH_SIZE = 64
-EPOCHS = 10
-LEARNING_RATE = 0.001
-LATENT_DIM = 4  # Dimensionality of the bottleneck (compressed representation)
+# Parameters
+TIME_STEPS = 30
 
-# Flags to enable/disable specific features
-PLOT_LOSS_CURVES = True
-PLOT_ERROR_DISTRIBUTION = True
-CALCULATE_CONFUSION_MATRIX = True
-PLOT_ROC_PR_CURVES = True
-
-def parse_logs(file_path):
-    """Load and preprocess logs."""
+# Function to load logs
+def load_logs(file_path):
     logs = []
+    timestamps = []
     with open(file_path, "r") as file:
         for line in file:
-            match = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[(.*?)\] \[(.*?)\]: .*?([\d.]+)%", line)
-            if match:
-                timestamp, server, component, value = match.groups()
-                logs.append({
-                    "timestamp": pd.to_datetime(timestamp),
-                    "server": server,
-                    "component": component,
-                    "value": float(value),
-                })
-    return pd.DataFrame(logs)
+            parts = line.strip().split(" | ")
+            timestamps.append(pd.to_datetime(parts[0]))
+            cpu = float(parts[1].split(": ")[1][:-1])
+            ram = float(parts[2].split(": ")[1][:-1])
+            disk = float(parts[3].split(": ")[1][:-1])
+            logs.append([cpu, ram, disk])
+    return pd.DataFrame(logs, columns=["cpu", "ram", "disk"]).assign(timestamp=timestamps)
 
-def preprocess_data(df, training_weeks):
-    """Split and normalize the data."""
-    split_point = df["timestamp"].min() + pd.Timedelta(weeks=training_weeks)
-    training_data = df[df["timestamp"] < split_point]
-    validation_data = df[df["timestamp"] >= split_point]
+# Function to create sequences
+def create_sequences(data, time_steps):
+    sequences = []
+    for i in range(len(data) - time_steps + 1):
+        sequences.append(data[i : i + time_steps])
+    return np.array(sequences)
 
-    # Normalize the values using Min-Max Scaling
-    from sklearn.preprocessing import MinMaxScaler
-    scaler = MinMaxScaler()
-    training_data["scaled_value"] = scaler.fit_transform(training_data[["value"]])
-    validation_data["scaled_value"] = scaler.transform(validation_data[["value"]])
+# Function to evaluate the model
+def evaluate_model(ground_truth_anomalies, detected_anomalies, total_samples, timestamps):
+    y_true = np.zeros(total_samples)
+    y_pred = np.zeros(total_samples)
 
-    return training_data, validation_data, scaler
+    # Map datetime anomalies to indices
+    ground_truth_indices = [
+        i for i, timestamp in enumerate(timestamps) if timestamp in ground_truth_anomalies
+    ]
 
-def build_autoencoder(input_dim, latent_dim):
-    """Define the autoencoder model."""
-    inputs = Input(shape=(input_dim,))
-    encoded = Dense(16, activation="relu")(inputs)
-    bottleneck = Dense(latent_dim, activation="relu")(encoded)
-    decoded = Dense(16, activation="relu")(bottleneck)
-    outputs = Dense(input_dim, activation="sigmoid")(decoded)
+    y_true[ground_truth_indices] = 1
+    y_pred[detected_anomalies] = 1
 
-    autoencoder = Model(inputs, outputs)
-    autoencoder.compile(optimizer=Adam(learning_rate=LEARNING_RATE), loss="mse")
-    return autoencoder
+    precision = precision_score(y_true, y_pred)
+    recall = recall_score(y_true, y_pred)
+    f1 = f1_score(y_true, y_pred)
+    cm = confusion_matrix(y_true, y_pred)
 
+    return precision, recall, f1, cm
+
+# Function to plot reconstruction error histogram
+def plot_error_histogram(errors, threshold, output_path):
+    plt.figure()
+    plt.hist(errors, bins=50, alpha=0.7, label="Reconstruction Error")
+    plt.axvline(x=threshold, color="red", linestyle="--", label="Threshold")
+    plt.title("Reconstruction Error Histogram")
+    plt.xlabel("Reconstruction Error")
+    plt.ylabel("Frequency")
+    plt.legend()
+    plt.savefig(output_path)
+    plt.close()
+
+# Main testing function
 def main():
-    # Load logs
     print("Loading logs...")
-    df = parse_logs(LOG_FILE_PATH)
+    df = load_logs(LOG_FILE_PATH)
     print(f"Loaded {len(df)} logs.")
 
-    # Preprocess data
-    print("Preprocessing data...")
-    training_data, validation_data, scaler = preprocess_data(df, TRAINING_WEEKS)
+    print("Loading scaler...")
+    scaler = joblib.load(SCALER_PATH)
 
-    # Prepare input for the autoencoder
-    X_train = training_data["scaled_value"].values.reshape(-1, 1)
-    X_val = validation_data["scaled_value"].values.reshape(-1, 1)
+    print("Creating sequences...")
+    scaled_data = scaler.transform(df[["cpu", "ram", "disk"]])
+    sequences = create_sequences(scaled_data, TIME_STEPS)
+    print(f"Prepared {len(sequences)} sequences for testing.")
 
-    # Build and train the autoencoder
-    print("Building autoencoder...")
-    autoencoder = build_autoencoder(input_dim=1, latent_dim=LATENT_DIM)
+    print("Loading trained model...")
+    model = load_model(MODEL_PATH)
 
-    early_stopping = EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True)
-    print("Training autoencoder...")
-    history = autoencoder.fit(X_train, X_train, validation_data=(X_val, X_val), epochs=EPOCHS,
-                              batch_size=BATCH_SIZE, shuffle=True, callbacks=[early_stopping], verbose=1)
+    print("Calculating reconstruction errors...")
+    reconstructed = model.predict(sequences)
+    reconstruction_errors = np.mean(np.power(sequences - reconstructed, 2), axis=(1, 2))
 
-    # Save the model and scaler
-    print("Saving model and scaler...")
-    os.makedirs(os.path.dirname(MODEL_FILE_PATH), exist_ok=True)
-    autoencoder.save(MODEL_FILE_PATH)  # Save as .keras format
-    joblib.dump(scaler, SCALER_FILE_PATH)
-    print(f"Model saved to {MODEL_FILE_PATH}.")
-    print(f"Scaler saved to {SCALER_FILE_PATH}.")
+    print("Optimizing threshold...")
+    threshold = np.percentile(reconstruction_errors, 99)  # Use 99th percentile as threshold
+    print(f"Optimal Threshold: {threshold}")
 
-    # Optional evaluations
-    if PLOT_LOSS_CURVES:
-        plot_loss_curves(history)
+    print("Identifying anomalies...")
+    anomaly_indices = np.where(reconstruction_errors > threshold)[0]
+    print(f"Detected {len(anomaly_indices)} anomalies.")
 
-    # Calculate reconstruction errors
-    train_reconstructions = autoencoder.predict(X_train)
-    train_errors = np.mean(np.square(train_reconstructions - X_train), axis=1)
+    print("Loading ground truth anomalies...")
+    with open(DEBUG_LOG_FILE_PATH, "r") as file:
+        ground_truth_anomalies = [pd.to_datetime(line.split(" | ")[0]) for line in file.readlines()]
+    print(f"Loaded {len(ground_truth_anomalies)} ground truth anomalies.")
 
-    val_reconstructions = autoencoder.predict(X_val)
-    val_errors = np.mean(np.square(val_reconstructions - X_val), axis=1)
+    print("Evaluating model...")
+    precision, recall, f1, cm = evaluate_model(
+        ground_truth_anomalies, anomaly_indices, len(df) - TIME_STEPS + 1, df["timestamp"][TIME_STEPS - 1:].values
+    )
+    print(f"Precision: {precision:.2f}")
+    print(f"Recall: {recall:.2f}")
+    print(f"F1-Score: {f1:.2f}")
+    print("Confusion Matrix:")
+    print(cm)
 
-    if PLOT_ERROR_DISTRIBUTION:
-        plot_error_distribution(train_errors, val_errors)
-
-    threshold = np.percentile(train_errors, 95)
-
-    if CALCULATE_CONFUSION_MATRIX:
-        calculate_confusion_matrix(val_errors, threshold)
-
-    if PLOT_ROC_PR_CURVES:
-        plot_roc_pr_curves(val_errors, threshold)
+    print("Saving reconstruction error histogram...")
+    plot_error_histogram(reconstruction_errors, threshold, ERROR_HISTOGRAM_PATH)
+    print(f"Saved anomalies to {ANOMALIES_OUTPUT_PATH}")
+    print(f"Saved reconstruction error histogram to {ERROR_HISTOGRAM_PATH}")
 
 if __name__ == "__main__":
     main()

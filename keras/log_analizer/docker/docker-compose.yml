@@ -1,11 +1,12 @@
-version: "3.8"
 services:
   generator:
     build:
-      context: .
-      dockerfile: generator.Dockerfile
+      context: ..
+      dockerfile: docker/generator.Dockerfile
     volumes:
       - ../logs:/app/logs
+      - ../charts:/app/charts  # Charts output
+      - ../generator:/app  # Mount the generator source code
     stdin_open: true
     tty: true
 
@@ -14,19 +15,21 @@ services:
       context: ..
       dockerfile: docker/train_model.Dockerfile
     volumes:
-      - ../logs:/app/logs
-      - ../models:/app/models
-      - ../charts:/app/charts
+      - ../logs:/app/logs  # Shared logs folder
+      - ../models:/app/models  # Model output
+      - ../charts:/app/charts  # Charts output
+      - ../analyzer:/app  # Mount the analyzer source code
     stdin_open: true
     tty: true
 
   test_model:
     build:
       context: ..
-      dockerfile: docker/train_model.Dockerfile
+      dockerfile: docker/test_model.Dockerfile
     volumes:
-      - ../analyzer:/app  # Mount the analyzer directory
-      - ../logs:/app/logs
-      - ../models:/app/models
-      - ../charts:/app/charts
-    command: python test_model.py
+      - ../logs:/app/logs  # Shared logs folder
+      - ../models:/app/models  # Load trained model and scaler
+      - ../charts:/app/charts  # Charts output
+      - ../analyzer:/app  # Mount the analyzer source code
+    stdin_open: true
+    tty: true
