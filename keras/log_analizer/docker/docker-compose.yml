@@ -1,0 +1,32 @@
+version: "3.8"
+services:
+  generator:
+    build:
+      context: .
+      dockerfile: generator.Dockerfile
+    volumes:
+      - ../logs:/app/logs
+    stdin_open: true
+    tty: true
+
+  train_model:
+    build:
+      context: ..
+      dockerfile: docker/train_model.Dockerfile
+    volumes:
+      - ../logs:/app/logs
+      - ../models:/app/models
+      - ../charts:/app/charts
+    stdin_open: true
+    tty: true
+
+  test_model:
+    build:
+      context: ..
+      dockerfile: docker/train_model.Dockerfile
+    volumes:
+      - ../analyzer:/app  # Mount the analyzer directory
+      - ../logs:/app/logs
+      - ../models:/app/models
+      - ../charts:/app/charts
+    command: python test_model.py
