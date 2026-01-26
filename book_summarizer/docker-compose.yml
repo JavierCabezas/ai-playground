@@ -1,0 +1,12 @@
+version: "3.9"
+
+services:
+  app:
+    build: .
+    volumes:
+      # Persist the trained model between runs
+      - ./models:/app/models
+    environment:
+      - PYTHONUNBUFFERED=1   # stream logs immediately
+    ports:
+      - "8000:8000"          # if you expose a web API
