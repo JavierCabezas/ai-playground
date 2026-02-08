@@ -10,46 +10,38 @@ INDEX_DIR = Path("models/index")
 
 class IndexerWrapper:
     def __init__(self):
+        # Local model that turns text into numerical meaning
         self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
-
-    def clean_text(self, text):
-        """Removes Gutenberg legal headers[cite: 2, 3]."""
-        start_marker = "*** START OF THE PROJECT GUTENBERG"
-        end_marker = "*** END OF THE PROJECT GUTENBERG"
-
-        s_idx = text.find(start_marker)
-        if s_idx != -1:
-            text = text[text.find("\n", s_idx) + 1:]
-
-        e_idx = text.find(end_marker)
-        if e_idx != -1:
-            text = text[:e_idx]
-        return text.strip()
 
     def run(self):
         all_chunks = []
         book_files = list(DATA_DIR.glob("*.txt"))
 
         for book_path in book_files:
-            print(f"Processing {book_path.name}...")
+            print(f"Indexing {book_path.name}...")
             with open(book_path, 'r', encoding='utf-8') as f:
-                content = self.clean_text(f.read())
-                # Chunk into 400-word blocks for AI readability
+                content = f.read()
+                # Split into chunks so the AI doesn't get overwhelmed
                 words = content.split()
-                chunks = [" ".join(words[i:i + 400]) for i in range(0, len(words), 400)]
+                chunks = [" ".join(words[i:i + 300]) for i in range(0, len(words), 300)]
                 for c in chunks:
+                    # We store the filename so the UI can filter by book
                     all_chunks.append(f"{book_path.name} | {c}")
 
-        if not all_chunks: return
+        if not all_chunks:
+            print("No text found in data folder!")
+            return
 
         # Create the searchable vector database
         embeddings = self.encoder.encode([c.split("|")[1] for c in all_chunks])
-        dim = embeddings.shape[1]
-        idx = faiss.IndexFlatL2(dim)
-        idx.add(np.array(embeddings).astype('float32'))
+        dimension = embeddings.shape[1]
+        index = faiss.IndexFlatL2(dimension)
+        index.add(np.array(embeddings).astype('float32'))
 
-        faiss.write_index(idx, str(INDEX_DIR / "books.index"))
+        # Save everything to the models volume
+        faiss.write_index(index, str(INDEX_DIR / "books.index"))
         with open(INDEX_DIR / "chunks.txt", "w", encoding="utf-8") as f:
             for chunk in all_chunks:
                 f.write(chunk.replace("\n", " ") + "\n")
+        print("Indexing complete.")
