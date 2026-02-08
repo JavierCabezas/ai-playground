@@ -1,12 +1,15 @@
 version: "3.9"
-
 services:
   app:
     build: .
     volumes:
-      # Persist the trained model between runs
       - ./models:/app/models
-    environment:
-      - PYTHONUNBUFFERED=1   # stream logs immediately
+      - ./data:/app/data
+      - hf_cache:/root/.cache/huggingface
     ports:
-      - "8000:8000"          # if you expose a web API
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+
+volumes:
+  hf_cache:
