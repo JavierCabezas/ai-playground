@@ -1,95 +1,87 @@
 import os
+import shutil
+import numpy as np
+import faiss
 from pathlib import Path
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
 from transformers import pipeline
 from sentence_transformers import SentenceTransformer
-import faiss
-import numpy as np
-from trainer import IndexerWrapper, INDEX_DIR
 
 app = FastAPI()
 
+# Configuration
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+
 # Global AI components
-gen_model = None  # Generative model for QA and Summarization
+gen_model = None
 encoder = None
-index = None
-chunks = []
-chunk_metadata = []
+current_index = None
+current_chunks = []
+current_book_name = "None"
 
 
-class QARequest(BaseModel):
-    question: str
-    book_name: str
-
-
-def bootstrap():
-    global gen_model, encoder, index, chunks, chunk_metadata
-    if not (INDEX_DIR / "books.index").exists():
-        IndexerWrapper().run()
-
-    # Load Flan-T5-Base (Generative)
-    # This model can summarize and answer complex questions
+@app.on_event("startup")
+async def startup_event():
+    global gen_model, encoder
+    print("🚀 Loading AI models... (This may take a minute on first run)")
+    # Generative model for summarization and logic
     gen_model = pipeline("text2text-generation", model="google/flan-t5-base")
+    # Semantic encoder for search
     encoder = SentenceTransformer('all-MiniLM-L6-v2')
-    index = faiss.read_index(str(INDEX_DIR / "books.index"))
-
-    with open(INDEX_DIR / "chunks.txt", "r", encoding="utf-8") as f:
-        for line in f:
-            if "|" in line:
-                fname, text = line.split("|", 1)
-                chunks.append(text.strip())
-                chunk_metadata.append(fname.strip())
-
-
-bootstrap()
+    print("✅ Models loaded.")
 
 
 @app.get("/", response_class=HTMLResponse)
 async def get_gui():
-    books = [f.name for f in Path("data").glob("*.txt")]
-    options = "".join([f'<option value="{b}">{b}</option>' for b in books])
     return f"""
     <html>
         <head>
-            <title>Offline Book AI (Generative)</title>
+            <title>Offline Book AI</title>
             <style>
-                body {{ font-family: sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; }}
-                .box {{ border: 1px solid #ccc; padding: 20px; border-radius: 8px; background: #fdfdfd; }}
-                button {{ padding: 10px; cursor: pointer; border-radius: 4px; border: none; font-weight: bold; }}
-                .btn-ask {{ background: #007bff; color: white; width: 70%; }}
-                .btn-sum {{ background: #28a745; color: white; width: 28%; }}
-                #res {{ margin-top: 20px; white-space: pre-wrap; background: #eee; padding: 15px; border-radius: 4px; display: none; }}
+                body {{ font-family: sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; background: #f8f9fa; }}
+                .container {{ background: white; padding: 30px; border-radius: 12px; shadow: 0 4px 12px rgba(0,0,0,0.1); }}
+                button {{ padding: 12px; margin: 10px 0; width: 100%; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }}
+                .btn-upload {{ background: #28a745; color: white; }}
+                .btn-ask {{ background: #007bff; color: white; }}
+                #res {{ margin-top: 20px; padding: 15px; background: #eee; border-radius: 6px; display: none; white-space: pre-wrap; }}
             </style>
         </head>
         <body>
-            <div class="box">
-                <h2>📚 Generative Book Explorer</h2>
-                <select id="b" style="width:100%; padding:10px; margin-bottom:10px;">{options}</select>
-                <input type="text" id="q" style="width:100%; padding:10px; margin-bottom:10px;" placeholder="Ask a question or request a summary...">
-
-                <button class="btn-ask" onclick="action('qa')">Ask Question</button>
-                <button class="btn-sum" onclick="action('sum')">Summarize Book</button>
-
+            <div class="container">
+                <h2>📖 Solo-Book Explorer</h2>
+                <p>Current: <b id="bn">{current_book_name}</b></p>
+                <input type="file" id="f" accept=".txt">
+                <button class="btn-upload" onclick="u()">Upload & Index</button>
+                <hr>
+                <input type="text" id="q" style="width:100%; padding:10px;" placeholder="Ask or Summarize...">
+                <button class="btn-ask" onclick="a('qa')">Ask AI</button>
+                <button style="background:#6c757d; color:white;" onclick="a('sum')">Summarize Book</button>
                 <div id="res"></div>
             </div>
             <script>
-                async function action(type) {{
+                async function u() {{
+                    const file = document.getElementById('f').files[0];
+                    if(!file) return;
+                    const fd = new FormData(); fd.append("file", file);
+                    document.getElementById('res').style.display = "block";
+                    document.getElementById('res').innerText = "Indexing...";
+                    await fetch('/upload', {{ method: 'POST', body: fd }});
+                    location.reload();
+                }}
+                async function a(t) {{
                     const out = document.getElementById('res');
                     out.style.display = "block";
-                    out.innerText = type === 'sum' ? "Processing full book (Map-Reduce)... this may take 1-2 mins." : "Searching and generating...";
-
-                    const endpoint = type === 'sum' ? '/summarize' : '/qa';
-                    const payload = type === 'sum' ? {{ book_name: document.getElementById('b').value }} : {{ question: document.getElementById('q').value, book_name: document.getElementById('b').value }};
-
-                    const r = await fetch(endpoint, {{
+                    out.innerText = "Processing...";
+                    const ep = t === 'sum' ? '/summarize' : '/qa';
+                    const r = await fetch(ep, {{
                         method: 'POST',
-                        headers: {{'Content-Type': 'application/json'}},
-                        body: JSON.stringify(payload)
+                        headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
+                        body: new URLSearchParams({{ 'question': document.getElementById('q').value }})
                     }});
                     const d = await r.json();
-                    out.innerHTML = `<strong>Result:</strong><br>${{d.answer || d.summary}}`;
+                    out.innerHTML = `<b>Result:</b><br>${{d.answer || d.summary}}`;
                 }}
             </script>
         </body>
@@ -97,42 +89,37 @@ async def get_gui():
     """
 
 
+@app.post("/upload")
+async def upload(file: UploadFile = File(...)):
+    global current_index, current_chunks, current_book_name
+    content = (await file.read()).decode("utf-8")
+    words = content.split()
+    current_chunks = [" ".join(words[i:i + 300]) for i in range(0, len(words), 300)]
+    current_book_name = file.filename
+
+    embeddings = encoder.encode(current_chunks)
+    current_index = faiss.IndexFlatL2(embeddings.shape[1])
+    current_index.add(np.array(embeddings).astype('float32'))
+    return {"status": "ok"}
+
+
 @app.post("/qa")
-async def answer(req: QARequest):
-    # Retrieve top 5 chunks for more "contextual" awareness
-    q_emb = encoder.encode([req.question])
-    _, indices = index.search(q_emb.astype('float32'), k=5)
-
-    context = ""
-    for idx in indices[0]:
-        if chunk_metadata[idx] == req.book_name:
-            context += chunks[idx] + " "
-
-    # Better prompting for generative models
-    prompt = f"Answer the following question based only on the provided context.\nContext: {context}\nQuestion: {req.question}"
-    result = gen_model(prompt, max_length=150)
-
-    return {"answer": result[0]['generated_text']}
+async def qa(question: str = Form(...)):
+    if not current_index: return {"answer": "Upload a book first."}
+    q_emb = encoder.encode([question])
+    _, i = current_index.search(q_emb.astype('float32'), k=5)
+    context = " ".join([current_chunks[idx] for idx in i[0]])
+    # Prompt with repetition penalty to fix the "fox, fox" issue
+    res = gen_model(f"Answer based on context: {context} Question: {question}", max_length=150, repetition_penalty=2.5)
+    return {"answer": res[0]['generated_text']}
 
 
 @app.post("/summarize")
-async def summarize(req: dict):
-    book_name = req.get("book_name")
-    # 1. Gather all chunks for the book
-    book_chunks = [chunks[i] for i, name in enumerate(chunk_metadata) if name == book_name]
-
-    # 2. Map: Summarize each chunk
-    partial_summaries = []
-    # To save time in the demo, we summarize every 2nd chunk or limit total count
-    for chunk in book_chunks[:15]:
-        res = gen_model(f"summarize in one sentence: {chunk}", max_length=50)
-        partial_summaries.append(res[0]['generated_text'])
-
-    # 3. Reduce: Final synthesis
-    final_prompt = "Combine these points into a cohesive summary of the book: " + " ".join(partial_summaries)
-    final_res = gen_model(final_prompt, max_length=300)
-
-    return {"summary": final_res[0]['generated_text']}
+async def summarize():
+    if not current_chunks: return {"summary": "No book."}
+    partials = [gen_model(f"summarize: {c}", max_length=50)[0]['generated_text'] for c in current_chunks[:15]]
+    res = gen_model("Summarize these points: " + " ".join(partials), max_length=300, repetition_penalty=2.0)
+    return {"summary": res[0]['generated_text']}
 
 
 if __name__ == "__main__":
